@@ -1,0 +1,13 @@
+# 重みと変換物は git に入れない。リリースアセットとして配る。
+# 履歴に 120 MB を入れると取り返しがつかない。
+*.bin
+*.safetensors
+*.spm
+manifest.json
+config.json
+generation_config.json
+tokenizer-*.json
+NOTICE
+
+# ローカルで組み立てるときの置き場
+/pack*/
