@@ -1,0 +1,108 @@
+name: Publish a model pack
+
+# パックを作ってリリースする。手元から 120 MB を上げる作業ではなく、毎回
+# 同じ手順で作られたものを配る。変換は shutx-net/codegloss の
+# tools/convert-fugumt/convert.py がやる（Hugging Face から取得し、torch も
+# transformers も要らない）。
+#
+# 重みは CC-BY-SA-4.0。**この git リポジトリには入れない。**アセットとして
+# 置くだけ。
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: リリースのタグ（例 fugumt-en-ja-1）
+        required: true
+        default: fugumt-en-ja-1
+      model_version:
+        description: manifest.json がこの値であることを確かめる
+        required: true
+        default: fugumt-en-ja-8b2d3d3b7da2
+      codegloss_ref:
+        description: convert.py を取ってくる shutx-net/codegloss の ref
+        required: true
+        default: main
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: convert and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # 変換スクリプトは本体側にある。パックの作り方を 2 か所に持たない。
+      - uses: actions/checkout@v7
+        with:
+          repository: shutx-net/codegloss
+          ref: ${{ inputs.codegloss_ref }}
+          path: codegloss
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: install the converter's dependencies
+        run: pip install -r codegloss/tools/convert-fugumt/requirements.txt
+
+      - name: convert
+        run: python3 codegloss/tools/convert-fugumt/convert.py pack
+
+      # 配る前に見る。どれも実際に踏んだ失敗。
+      - name: check the pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail() { echo "NG: $1" >&2; exit 1; }
+
+          for name in manifest.json config.json generation_config.json \
+                      pytorch_model.bin tokenizer-source.json \
+                      tokenizer-target.json LICENSE NOTICE; do
+            [ -f "pack/$name" ] || fail "pack/$name がありません"
+          done
+
+          # convert.py は CC-BY-SA-4.0 の全文をネットから取るが、取れないと
+          # URL だけを書いた 200 バイト程度のファイルを置いて警告を出す。
+          # 全文の同梱はライセンスの要求なので、短縮版では配らない。
+          bytes=$(wc -c < pack/LICENSE)
+          [ "$bytes" -gt 10000 ] ||
+            fail "LICENSE が $bytes バイトしかありません（全文が取れていない）"
+
+          version=$(python3 -c 'import json;print(json.load(open("pack/manifest.json"))["model_version"])')
+          [ "$version" = "${{ inputs.model_version }}" ] ||
+            fail "manifest.json は $version、期待は ${{ inputs.model_version }}"
+
+          # manifest は残り全部の sha256 を持つ。それが本当に合っているかを
+          # ここで見る。CodeGloss は取得したパックを同じ規則で照合するので、
+          # ここが合わないものを上げると利用者側で必ず落ちる。
+          python3 - <<'PY'
+          import hashlib, json, pathlib, sys
+          pack = pathlib.Path("pack")
+          manifest = json.loads((pack / "manifest.json").read_text())
+          for name, entry in manifest["files"].items():
+              path = pack / name
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              if path.stat().st_size != entry["bytes"] or digest != entry["sha256"]:
+                  sys.exit(f"NG: {name} が manifest.json と合いません")
+          print(f"OK: {len(manifest['files'])} ファイルが manifest.json と一致")
+          PY
+
+      # アーカイブにまとめない。CodeGloss は名前で 1 つずつ取りに行く
+      # （展開のための依存を持たないため）。
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ inputs.tag }}" \
+            --title "${{ inputs.tag }}" \
+            --notes "staka/fugumt-en-ja (CC-BY-SA-4.0). 帰属表示とライセンスは README と同梱の NOTICE / LICENSE を参照。" \
+            pack/manifest.json \
+            pack/config.json \
+            pack/generation_config.json \
+            pack/pytorch_model.bin \
+            pack/tokenizer-source.json \
+            pack/tokenizer-target.json \
+            pack/LICENSE \
+            pack/NOTICE
